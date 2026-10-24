@@ -1,4 +1,4 @@
-﻿using ACadSharp.Entities;
+using ACadSharp.Entities;
 using ACadSharp.IO.Templates;
 using System.Collections.Generic;
 
@@ -23,6 +23,15 @@ internal class DwgDocumentBuilder : CadDocumentBuilder
 	/// Defaults to false; full/lazy read behavior is unchanged.
 	/// </summary>
 	public bool SkipEntityTracking { get; set; }
+
+	/// <summary>
+	/// [PERF] Also discards <see cref="BlockRecordTemplates"/> (consumed only inside BuildDocument).
+	/// </summary>
+	public override void DiscardTemplates()
+	{
+		base.DiscardTemplates();
+		this.BlockRecordTemplates.Clear();
+	}
 
 	public override bool KeepUnknownEntities => this.Configuration.KeepUnknownEntities;
 

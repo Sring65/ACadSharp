@@ -153,6 +153,11 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 		// After the document is built (AppId names resolved), assign R2000 private gradients
 		this._sectionReader?.ApplyR2000Gradients();
 
+		// [PERF] After the build is fully consumed (BuildDocument/BuildDataStorage/ApplyR2000Gradients done),
+		// release the handle→template index dictionaries + template wrappers (see DwgReaderConfiguration.DiscardTemplatesAfterBuild).
+		if (this.Configuration.DiscardTemplatesAfterBuild)
+			this._builder.DiscardTemplates();
+
 		// [PATCH] phase timing: read fully finished
 		DwgReadDiagnostics.MarkBuildEnd();
 
@@ -641,6 +646,68 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 	{
 		if (!fileheader.Descriptors.TryGetValue(sectionName, out DwgSectionDescriptor descriptor))
 			return null;
+
+		// [PERF] 惰性页解压读模式（UseLazyObjectSection）：只建页目录（零额外磁盘 I/O），不解压任何页；
+		// DwgObjectReader 读对象时按需逐页解压，并按读取顺序异步多线程预解压后续页。
+		// 与 ParallelDecode（并行解码需整节只读映像）/ UseDiskSectionCache（整节磁盘映像）互斥——同时开启时回退 eager 并提示。
+		if (sectionName == DwgSectionDefinition.AcDbObjects
+			&& this.Configuration.UseLazyObjectSection
+			&& descriptor.IsCompressed
+			&& this._fileStream.Stream is FileStream rawFileLazy)
+		{
+			if (this.Configuration.ParallelDecode || this.Configuration.UseDiskSectionCache)
+			{
+				Console.Error.WriteLine("[ACadSharp] UseLazyObjectSection 与 ParallelDecode/UseDiskSectionCache 互斥，回退整节解压（eager）模式。");
+			}
+			else
+			{
+				// 注意：页目录必须先于任何页头解析快照——decryptDataSection 会用 (checksum + startOffset) 覆盖 LocalSections[].Offset，
+				// 而此处的 Offset 是惰性流定位页所需的"解压映像内偏移"（构造时已固化到数组）。
+				var lazy = new DwgLazySectionStream(rawFileLazy.Name, descriptor, this.Configuration);
+
+				// [PERF] RetainPatchSource 增量保存需要页头元数据（CompressedSize/PageSize/Checksum）构建 patch source：
+				// 此处做"仅头部扫描"——在原始流上直接 seek 各页 32B XOR 头并解析（不解压页体；BGDY ~27.7k 页约 0.1-0.2s）。
+				// 字段语义与 decryptDataSection 完全一致（同一 XOR 掩码 0x4164536B^seeker、小端 4 字节布局）。
+				if (this.Configuration.RetainPatchSource)
+				{
+					byte[] pageHdr = new byte[32];
+					long lastSeeker = 0;
+					long lastCompressedSize = 0;
+					foreach (DwgLocalSectionMap section in descriptor.LocalSections)
+					{
+						if (section.IsEmpty)
+							continue;
+						rawFileLazy.Position = section.Seeker;
+						int readTotal = 0;
+						while (readTotal < 32)
+						{
+							int n = rawFileLazy.Read(pageHdr, readTotal, 32 - readTotal);
+							if (n <= 0)
+								break;
+							readTotal += n;
+						}
+						int secMask = 0x4164536B ^ (int)section.Seeker;
+						uint csize = (uint)BitConverter.ToInt32(pageHdr, 8);
+						uint psize = (uint)BitConverter.ToInt32(pageHdr, 12);
+						uint startOffset = (uint)BitConverter.ToInt32(pageHdr, 16);
+						uint checksum = (uint)BitConverter.ToInt32(pageHdr, 20);
+						uint dataChecksum = (uint)BitConverter.ToInt32(pageHdr, 24);
+						section.CompressedSize = (ulong)(csize ^ (uint)secMask);
+						section.PageSize = (int)(int)(psize ^ (uint)secMask);
+						section.Offset = (ulong)((long)(checksum ^ (uint)secMask) + (long)(startOffset ^ (uint)secMask));
+						section.Checksum = dataChecksum ^ (uint)secMask;
+						lastSeeker = section.Seeker;
+						lastCompressedSize = (long)section.CompressedSize;
+					}
+
+					//与 eager 路径读后状态对齐：原始流定位到最后一页压缩数据尾部
+					if (lastSeeker != 0)
+						rawFileLazy.Position = lastSeeker + 32 + lastCompressedSize;
+				}
+
+				return lazy;
+			}
+		}
 
 		//get the total size of the page
 		Stream memoryStream = this.CreateSectionBuffer(sectionName, (long)descriptor.DecompressedSize * descriptor.LocalSections.Count);

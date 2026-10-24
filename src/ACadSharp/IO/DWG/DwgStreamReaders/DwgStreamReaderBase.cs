@@ -123,7 +123,11 @@ namespace ACadSharp.IO.DWG
 		public DwgStreamReaderBase(Stream stream, bool resetPosition) : base(stream, resetPosition)
 		{
 			// [PATCH] Byte buffer enabled only for file streams; memory streams (the per-object temporary readers of the object scan) keep the original direct-read path
-			if (!(stream is MemoryStream))
+			// [PERF] DwgLazySectionStream (lazy page mode) also keeps the direct-read path: its Position setter is
+			// called once per object, and the buffered path would invalidate the 64KB buffer and re-issue one
+			// 64KB ReadAt per object (measured: 2.8M such reads, ~5.7M general-path ReadAt, ~25s of the decode).
+			// The lazy stream already page-caches, so field-sized direct reads are the intended access pattern.
+			if (!(stream is MemoryStream) && !(stream is DwgLazySectionStream))
 				this._buf = new byte[65536];
 		}
 

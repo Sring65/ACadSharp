@@ -72,6 +72,14 @@ namespace ACadSharp.IO.DWG
 
 		private int _cloneSlot;
 
+		// [PERF] Lazy page-decompression mode (UseLazyObjectSection):
+		// _memoryStream is the DwgLazySectionStream itself; per-object read views are pooled here (slot-reuse, like _diskViewStreams)
+		// and the read cursor drives the predictive page prefetch window.
+		private DwgLazySectionStream _lazySection;
+		private int _prefetchDepthPages;
+		private int _prefetchTick;
+		private readonly DwgLazySectionView[] _lazyViewPool = new DwgLazySectionView[8];
+
 		// [FIX] Shared object-section image array for P3 parallel workers (exported by the ReadParallel main thread, a single copy).
 		// When cloning sub-views (object/handles/text), build independent cursor views directly from this array, avoiding
 		// GetBuffer() on an array-backed MemoryStream throwing UnauthorizedAccessException under .NET 10 (the original catch fallback
@@ -231,7 +239,18 @@ namespace ACadSharp.IO.DWG
 
 			if (this._memoryStream == null)
 			{
-				if (this._reader.Stream is MemoryStream memoryStream)
+				// [PERF] Lazy page-decompression mode: the section stream is a DwgLazySectionStream — reuse it directly
+				// (do NOT CopyTo the whole image: that would decompress every page upfront and defeat the mode).
+				// Object reads go through its ReadAt (per-page on-demand decompression + predictive prefetch);
+				// the lazy stream owns its own raw-file handle, so this reader is responsible for closing it.
+				if (this._reader.Stream is DwgLazySectionStream lazySection)
+				{
+					this._memoryStream = lazySection;
+					this._ownsSectionStream = true;
+					this._lazySection = lazySection;
+					this._prefetchDepthPages = Math.Max(1, this._builder.Configuration.LazyPrefetchDepth);
+				}
+				else if (this._reader.Stream is MemoryStream memoryStream)
 				{
 					try
 					{
@@ -335,6 +354,19 @@ namespace ACadSharp.IO.DWG
 			if (this._objectRanges != null && this._objectTotalLength > 0)
 			{
 				this._objectRanges[handle] = new ObjectByteRange(this._objectStartOffset, this._objectTotalLength);
+			}
+
+			// [PERF] Lazy mode: predict the read order — every 64 objects, prefetch the next page window
+			// (LazyPrefetchDepth pages ahead of the read cursor, ~30KB/page for BGDY) asynchronously,
+			// so the main thread finds most upcoming pages already decompressed. BFS jumps that fall
+			// outside the window are still covered by on-demand inline decompression.
+			if (this._lazySection != null)
+			{
+				if (++this._prefetchTick >= 64)
+				{
+					this._prefetchTick = 0;
+					this._lazySection.EnqueuePrefetchWindow(this._crcReader.Position, this._prefetchDepthPages);
+				}
 			}
 
 			// [PATCH] Streaming scan: post-read callback (extract fields / release via PruneTemplate)
@@ -575,6 +607,27 @@ namespace ACadSharp.IO.DWG
 				Stream s = this._diskViewStreams[slot];
 				s.Position = 0; // will be overridden by SetPositionInBits
 				return s;
+			}
+
+			// [PERF] Lazy page-decompression mode: the view is a pooled DwgLazySectionView (MemoryStream-derived,
+			// so DwgStreamReaderBase does NOT allocate a 64KB buffer per view); the slot is reused across objects
+			// (like _diskViewStreams) to avoid per-object allocation. The view reads through the owner's ReadAt,
+			// which decompresses pages on demand.
+			if (src is DwgLazySectionStream lazyOwner)
+			{
+				int lazySlot = this._cloneSlot++;
+				DwgLazySectionView lazyView = this._lazyViewPool[lazySlot];
+				if (lazyView == null)
+				{
+					lazyView = lazyOwner.CreateView();
+					this._lazyViewPool[lazySlot] = lazyView;
+				}
+				else
+				{
+					lazyView.Reset(lazyOwner);
+				}
+				lazyView.Position = 0; // will be overridden by SetPositionInBits
+				return lazyView;
 			}
 
 			throw new NotSupportedException("不支持的解压映像流类型，无法克隆视图：" + src.GetType().Name);

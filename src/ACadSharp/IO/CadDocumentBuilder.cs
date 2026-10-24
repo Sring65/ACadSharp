@@ -1,4 +1,4 @@
-﻿using ACadSharp.DataStorage;
+using ACadSharp.DataStorage;
 using ACadSharp.Entities;
 using ACadSharp.IO.Templates;
 using ACadSharp.Objects;
@@ -105,6 +105,24 @@ internal abstract class CadDocumentBuilder
 		this.tableEntryTemplates.Remove(h);
 		this.tableTemplates.Remove(h);
 		this.dictionaryTemplates.Remove(h);
+	}
+
+	/// <summary>
+	/// [PERF] Discards the handle→template index dictionaries and the template wrapper objects after the
+	/// document build is fully complete (call only from the full-read path, after BuildDocument/BuildDataStorage).
+	/// The final document shares the same CadObject instances the templates wrapped, so the document graph is
+	/// untouched; only the build-phase staging (dictionaries + wrapper metadata such as EData indexes and
+	/// ReactorsHandles sets) becomes reclaimable by the GC.
+	/// </summary>
+	public virtual void DiscardTemplates()
+	{
+		this.templatesMap.Clear();
+		this.cadObjects.Clear();
+		this.cadObjectsTemplates.Clear();
+		this.dictionaryTemplates.Clear();
+		this.tableEntryTemplates.Clear();
+		this.tableTemplates.Clear();
+		this.unassignedObjects.Clear();
 	}
 
 	/// <summary>
