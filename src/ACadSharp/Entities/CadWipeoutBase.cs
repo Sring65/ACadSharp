@@ -166,6 +166,18 @@ public abstract class CadWipeoutBase : Entity
 	public XY Size { get; set; }
 
 	/// <summary>
+	/// World-space clip preview polygon (DXF group 92/310 in the AcDbEntity section), in world coordinates.
+	/// </summary>
+	/// <remarks>
+	/// Only present in DXF; the DWG format stores no such blob. When present, this is the
+	/// authoritative world geometry of the clip boundary: some files carry 14/24 local
+	/// vertices that are a mirror image of the world blob, so the blob must take precedence.
+	/// Layout: int32[5] header (totalLen, 1, totalLen-8, 6, vertexCount) followed by
+	/// vertexCount × (x, y, z) little-endian doubles.
+	/// </remarks>
+	public byte[] WorldClipPreview { get; set; }
+
+	/// <summary>
 	/// U-vector of a single pixel(points along the visual bottom of the image, starting at the insertion point) (in WCS)
 	/// </summary>
 	[DxfCodeValue(11, 21, 31)]
@@ -220,6 +232,85 @@ public abstract class CadWipeoutBase : Entity
 		// [PATCH] Clip boundary vertices are relative to the insert point in the OCS plane
 		// (AutoCAD TransformBy leaves them untouched: a wipeout clip (-0.3889, -0.2778) and an
 		// image clip (259.5, 259.5) keep their values after a transform). Do NOT transform them.
+
+		// [PATCH] The 92/310 world clip preview blob, when present, stores world-space points
+		// and must follow the transform like any other location (or it goes stale and the
+		// engine renders the pre-transform shape).
+		if (this.WorldClipPreview != null && TryDecodeWorldClip(this.WorldClipPreview, out List<XYZ> worldVerts))
+		{
+			for (int i = 0; i < worldVerts.Count; i++)
+			{
+				worldVerts[i] = transform.ApplyTransform(worldVerts[i]);
+			}
+
+			this.WorldClipPreview = EncodeWorldClip(worldVerts);
+		}
+	}
+
+	/// <summary>
+	/// Decode the 92/310 world clip preview blob into world-space vertices.
+	/// </summary>
+	/// <param name="data">Raw 310 bytes (int32[5] header + count × 3 LE doubles).</param>
+	/// <param name="worldVertices">Decoded world vertices when the blob is structurally valid.</param>
+	public static bool TryDecodeWorldClip(byte[] data, out List<XYZ> worldVertices)
+	{
+		worldVertices = null;
+
+		if (data == null || data.Length < 20)
+		{
+			return false;
+		}
+
+		int totalLen = BitConverter.ToInt32(data, 0);
+		int marker = BitConverter.ToInt32(data, 4);
+		int count = BitConverter.ToInt32(data, 16);
+
+		if (totalLen != data.Length || marker != 1 || count < 3)
+		{
+			return false;
+		}
+
+		if (data.Length != 20 + count * 24)
+		{
+			return false;
+		}
+
+		worldVertices = new List<XYZ>(count);
+		for (int i = 0; i < count; i++)
+		{
+			int off = 20 + i * 24;
+			double x = BitConverter.ToDouble(data, off);
+			double y = BitConverter.ToDouble(data, off + 8);
+			double z = BitConverter.ToDouble(data, off + 16);
+
+			worldVertices.Add(new XYZ(x, y, z));
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Re-encode world-space vertices into the 92/310 blob layout (int32[5] header + count × 3 LE doubles).
+	/// </summary>
+	public static byte[] EncodeWorldClip(List<XYZ> worldVertices)
+	{
+		int count = worldVertices.Count;
+		byte[] data = new byte[20 + count * 24];
+		Buffer.BlockCopy(BitConverter.GetBytes(20 + count * 24), 0, data, 0, 4);
+		Buffer.BlockCopy(BitConverter.GetBytes(1), 0, data, 4, 4);
+		Buffer.BlockCopy(BitConverter.GetBytes(12 + count * 24), 0, data, 8, 4);
+		Buffer.BlockCopy(BitConverter.GetBytes(6), 0, data, 12, 4);
+		Buffer.BlockCopy(BitConverter.GetBytes(count), 0, data, 16, 4);
+
+		for (int i = 0; i < count; i++)
+		{
+			int off = 20 + i * 24;
+			Buffer.BlockCopy(BitConverter.GetBytes(worldVertices[i].X), 0, data, off, 8);
+			Buffer.BlockCopy(BitConverter.GetBytes(worldVertices[i].Y), 0, data, off + 8, 8);
+			Buffer.BlockCopy(BitConverter.GetBytes(worldVertices[i].Z), 0, data, off + 16, 8);
+		}
+
+		return data;
 	}
 
 	/// <inheritdoc/>
@@ -235,22 +326,47 @@ public abstract class CadWipeoutBase : Entity
 	/// <inheritdoc/>
 	public override BoundingBox GetBoundingBox()
 	{
+		// [PATCH] The 92/310 world clip preview blob is already in world coordinates.
+		if (this.WorldClipPreview != null && TryDecodeWorldClip(this.WorldClipPreview, out List<XYZ> worldVerts))
+		{
+			double wMinX = worldVerts.Min(v => v.X);
+			double wMinY = worldVerts.Min(v => v.Y);
+			double wMinZ = worldVerts.Min(v => v.Z);
+			double wMaxX = worldVerts.Max(v => v.X);
+			double wMaxY = worldVerts.Max(v => v.Y);
+			double wMaxZ = worldVerts.Max(v => v.Z);
+
+			return new BoundingBox(new XYZ(wMinX, wMinY, wMinZ), new XYZ(wMaxX, wMaxY, wMaxZ));
+		}
+
 		if (!this.ClipBoundaryVertices.Any())
 		{
 			return BoundingBox.Null;
 		}
 
-		double minX = this.ClipBoundaryVertices.Select(v => v.X).Min();
-		double minY = this.ClipBoundaryVertices.Select(v => v.Y).Min();
-		XYZ min = new XYZ(minX, minY, 0) + this.InsertPoint;
+		// [PATCH] Clip vertices are image-normalized coordinates (origin at the image
+		// center, y pointing down), not plain offsets from the insert point.
+		// Transform each vertex: world = InsertPoint + (x+0.5) * UVector + (0.5 - y) * VVector.
+		// (The standard formula origin + x·U + y·V yields a y-mirrored position;
+		// verified point-by-point against the 310 world-clip blob of sample files.)
+		XYZ? min = null;
+		XYZ? max = null;
+		foreach (XY bv in this.ClipBoundaryVertices)
+		{
+			XYZ world = this.InsertPoint + this.UVector * (bv.X + 0.5) + this.VVector * (0.5 - bv.Y);
 
-		double maxX = this.ClipBoundaryVertices.Select(v => v.X).Max();
-		double maxY = this.ClipBoundaryVertices.Select(v => v.Y).Max();
-		XYZ max = new XYZ(maxX, maxY, 0) + this.InsertPoint;
+			if (min == null)
+			{
+				min = world;
+				max = world;
+				continue;
+			}
 
-		BoundingBox box = new BoundingBox(min, max);
+			min = new XYZ(Math.Min(min.Value.X, world.X), Math.Min(min.Value.Y, world.Y), Math.Min(min.Value.Z, world.Z));
+			max = new XYZ(Math.Max(max.Value.X, world.X), Math.Max(max.Value.Y, world.Y), Math.Max(max.Value.Z, world.Z));
+		}
 
-		return box;
+		return new BoundingBox(min.Value, max.Value);
 	}
 
 	/// <inheritdoc/>

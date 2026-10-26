@@ -1,5 +1,7 @@
-﻿using ACadSharp.Entities;
+using ACadSharp.Entities;
 using ACadSharp.Objects;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace ACadSharp.IO.Templates
 {
@@ -9,6 +11,10 @@ namespace ACadSharp.IO.Templates
 
 		public ulong? ImgReactorHandle { get; set; }
 
+		// [PATCH] 310 chunks of the world clip preview blob (DXF 92/310, AcDbEntity section);
+		// the blob can span multiple 310 lines, so they are accumulated and merged in build().
+		public List<byte[]> WorldClipChunks { get; set; } = new List<byte[]>();
+
 		public CadWipeoutBaseTemplate(CadWipeoutBase image) : base(image) { }
 
 		protected override void build(CadDocumentBuilder builder)
@@ -16,6 +22,11 @@ namespace ACadSharp.IO.Templates
 			base.build(builder);
 
 			CadWipeoutBase image = this.CadObject as CadWipeoutBase;
+
+			if (this.WorldClipChunks.Any())
+			{
+				image.WorldClipPreview = this.WorldClipChunks.SelectMany(c => c).ToArray();
+			}
 
 			if (builder.TryGetCadObject(this.ImgDefHandle, out ImageDefinition imgDef))
 			{

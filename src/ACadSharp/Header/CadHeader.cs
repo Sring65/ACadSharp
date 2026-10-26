@@ -1,4 +1,4 @@
-﻿using ACadSharp.Attributes;
+using ACadSharp.Attributes;
 using ACadSharp.Entities;
 using ACadSharp.Objects;
 using ACadSharp.Tables;
@@ -1719,6 +1719,18 @@ public class CadHeader
 	/// </remarks>
 	[CadSystemVariable("$LWDISPLAY", 290)]
 	public bool DisplayLineWeight { get; set; } = false;
+
+	/// <summary>
+	/// Scale factor applied to the lineweight of objects when line-weight display is on.
+	/// Default 1.0 = nominal (no scaling). [PATCH] Added so the image engine can honour the
+	/// file-global $LWEIGHTSCALE; the DXF reader picks it up via GetHeaderMap()/SetValue.
+	/// Not in DxfWriterConfiguration.Variables, so adding it does not change DXF/DWG export bytes.
+	/// </summary>
+	/// <remarks>
+	/// System variable LWEIGHTSCALE
+	/// </remarks>
+	[CadSystemVariable("$LWEIGHTSCALE", 70)]
+	public double LineweightScale { get; set; } = 1.0;
 
 	/// <summary>
 	/// Controls display of silhouette edges of 3D solid and surface objects in the Wireframe or 2D Wireframe visual styles.

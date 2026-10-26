@@ -1,4 +1,4 @@
-﻿using ACadSharp.Attributes;
+using ACadSharp.Attributes;
 using ACadSharp.Classes;
 
 namespace ACadSharp.Entities;
@@ -30,6 +30,29 @@ public class Wipeout : CadWipeoutBase, IDxfClassDefined
 	{
 		this.Flags = ImageDisplayFlags.ShowImage | ImageDisplayFlags.ShowNotAlignedImage | ImageDisplayFlags.UseClippingBoundary;
 	}
+
+	/// <summary>
+	/// Border width (modern WIPEOUT, group code 41, units = drawing units).
+	/// 0/absent = no border (legacy R13 eraser behavior).
+	/// </summary>
+	[DxfCodeValue(41)]
+	public double BorderWidth { get; set; }
+
+	/// <summary>
+	/// Fill color (modern WIPEOUT, group code 42): 0=background(eraser), 71=black, 72=white, 73=gray.
+	/// 0/absent = background eraser (legacy R13 WIPEOUT with no image erases to the background color).
+	/// NOTE: group code 42 is a Real in DXF, so the property must be double to match the reader value type
+	/// (a non-double property would fail DxfPropertyBase.SetValue's strict type check and be silently dropped).
+	/// </summary>
+	[DxfCodeValue(42)]
+	public double FillColor { get; set; }
+
+	/// <summary>
+	/// Fill transparency (modern WIPEOUT, group code 43), range 0..1.
+	/// Parsed for completeness; not yet applied to the raster/SVG output.
+	/// </summary>
+	[DxfCodeValue(43)]
+	public double FillTransparency { get; set; }
 
 	/// <inheritdoc/>
 	public DxfClass GetDxfClass()

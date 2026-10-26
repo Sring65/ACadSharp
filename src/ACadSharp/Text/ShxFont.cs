@@ -60,6 +60,10 @@ public sealed class ShxFont
     // name (lowercased, whitespace-trimmed) -> code; used by <see cref="ShxFormat.Shapes"/> only.
     private readonly Dictionary<string, int>? _names;
 
+    // True when this font is meant to be consumed as a text face (unifont/bigfont always; a shapes file only when
+    // it is a "font in shapes clothing" — shape 0 is a font-definition record and the rest are char-coded glyphs).
+    private readonly bool _isTextFont;
+
     /// <summary>How many bytes to scan forward in the file looking for the <c>0x1A</c> header terminator.</summary>
     private const int HeaderScanLimit = 40;
 
@@ -92,6 +96,10 @@ public sealed class ShxFont
     /// <c>w</c> operator); there is no filled outline: the bowl of an <c>O</c> is a single stroked arc, not two outlines.</summary>
     public bool IsStroked { get; }
 
+    /// <summary>True when this font is a text face. Unifont and bigfont always are; a shapes file is one only when
+    /// <see cref="LoadShapes"/> found a font-definition record in shape 0 (a "font in shapes clothing").</summary>
+    public bool IsTextFont => _isTextFont;
+
     /// <summary>The lead-byte ranges of the double-byte encoding; empty for <see cref="ShxFormat.Unifont"/>.</summary>
     public (int Start, int End)[] LeadByteRanges { get; }
 
@@ -100,7 +108,7 @@ public sealed class ShxFont
 
     private ShxFont(ShxFormat format, string header, string name, int above, int below,
         int modes, (int Start, int End)[] leadByteRanges,
-        Dictionary<int, byte[]> glyphs, Dictionary<string, int>? names = null)
+        Dictionary<int, byte[]> glyphs, Dictionary<string, int>? names = null, bool isTextFont = true)
     {
         Format = format;
         Header = header;
@@ -112,6 +120,7 @@ public sealed class ShxFont
         LeadByteRanges = leadByteRanges;
         _glyphs = glyphs;
         _names = names;
+        _isTextFont = isTextFont;
         var codes = new List<int>(glyphs.Keys);
         codes.Sort();
         Codes = codes.ToArray();
@@ -303,8 +312,31 @@ public sealed class ShxFont
             cursor += size;
         }
 
-        return new ShxFont(ShxFormat.Shapes, header, header, 0, 0, 0,
-            Array.Empty<(int, int)>(), glyphs, names);
+        // "Font in shapes clothing": some SHX text faces (e.g. rs.shx "Simplex roman") carry a shapes container but store
+        // a font-definition record in shape 0 (name + above + below + modes) and the char glyphs keyed by ASCII code. AutoCAD
+        // uses such a file as a text face (char code -> shape number). Detect it so the SHX text path can consume it: pull the
+        // font-definition into Above/Below/Modes (the text path scales by cap height) and drop shape 0 from the glyph set.
+        // A genuine symbol library (SHAPE entities / linetypes) has no such shape-0 font-def, so it stays a plain shapes library.
+        string fontName = header;
+        int above = 0, below = 0, modes = 0;
+        bool isTextFont = false;
+        if (glyphs.TryGetValue(0, out var s0))
+        {
+            var nul0 = s0.AsSpan().IndexOf((byte)0);
+            var tail0 = nul0 >= 0 ? s0.AsSpan()[(nul0 + 1)..] : ReadOnlySpan<byte>.Empty;
+            // A font-definition record is name + exactly 3 bytes (above, below, modes), optionally 1 pad byte. A real shape's
+            // instruction program is longer, so a 3-4 byte tail with a plausible ascent is the discriminator.
+            int a0 = tail0[0], b0 = tail0[1];
+            if (tail0.Length is >= 3 and <= 4 && a0 is > 0 and <= 1000 && b0 is >= 0 and <= 1000)
+            {
+                (fontName, above, below, modes) = ReadFontDefinition(s0);
+                isTextFont = above > 0;
+                if (isTextFont) glyphs.Remove(0);
+            }
+        }
+
+        return new ShxFont(ShxFormat.Shapes, header, fontName, above, below, modes,
+            Array.Empty<(int, int)>(), glyphs, names, isTextFont);
     }
 
     /// <summary>

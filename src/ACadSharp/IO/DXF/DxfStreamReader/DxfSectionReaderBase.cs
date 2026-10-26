@@ -1698,6 +1698,18 @@ internal abstract class DxfSectionReaderBase
 
 		switch (this._reader.Code)
 		{
+			case 92:
+				// [PATCH] Length of the world clip preview blob (undocumented, WIPEOUT only,
+				// AcDbEntity section). Validation only; the blob itself arrives as 310.
+				return true;
+			case 310:
+				// [PATCH] World clip preview blob (undocumented, WIPEOUT only, AcDbEntity
+				// section). It can span multiple 310 lines, so the chunks are accumulated in
+				// the template and merged into WorldClipPreview at build(). Without this the
+				// blob was silently dropped (readCommonEntityCodes skips 310) and the engine
+				// fell back to the 14/24 local vertices, which some files store mirrored.
+				tmp.WorldClipChunks.Add(this._reader.ValueAsBinaryChunk);
+				return true;
 			case 71:
 				return true;
 			case 91:

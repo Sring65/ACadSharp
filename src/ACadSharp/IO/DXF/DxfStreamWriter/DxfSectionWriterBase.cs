@@ -1,4 +1,4 @@
-﻿using ACadSharp.Entities;
+using ACadSharp.Entities;
 using ACadSharp.IO.DXF.DxfStreamWriter;
 using ACadSharp.Tables;
 using ACadSharp.XData;
@@ -202,6 +202,17 @@ internal abstract partial class DxfSectionWriterBase
 		this._writer.Write(DxfCode.Subclass, DxfSubclassMarker.Entity);
 
 		this._writer.Write(8, entity.Layer.Name);
+
+		// [PATCH] WIPEOUT world clip preview blob (undocumented DXF 92/310, AcDbEntity
+		// section): re-emit the captured blob verbatim so the round trip keeps the
+		// authoritative world geometry. AutoCAD places it right after the layer code.
+		// (For ProxyEntity the same codes mean graphics data; that type is written by its
+		// own writer path and never reaches this branch with a Wipeout.)
+		if (entity is Wipeout wo && wo.WorldClipPreview != null)
+		{
+			this._writer.Write(92, wo.WorldClipPreview.Length);
+			this._writer.Write(310, wo.WorldClipPreview);
+		}
 
 		this._writer.Write(6, entity.LineType.Name);
 

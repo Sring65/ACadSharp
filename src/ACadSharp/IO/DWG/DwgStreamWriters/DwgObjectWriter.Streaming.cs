@@ -257,6 +257,12 @@ internal partial class DwgObjectWriter
 				break;
 			case PolyfaceMesh pm:
 				AssignVertexAndSeqendHandles(pm.Vertices);
+				// [Bug4] Faces are written as children (see writeEntity PolyfaceMesh dispatch) but the
+				// original code only assigned handles to Vertices -> all faces kept Handle 0 -> the 2nd
+				// face's registerObject Map.Add(0) collided with the 1st ("Key: 0"). Assign handles here.
+				foreach (var f in pm.Faces)
+					if (f is CadObject fc && fc.Handle == 0)
+						AssignNextHandle(fc);
 				break;
 			case PolygonMesh gm:
 				AssignVertexAndSeqendHandles(gm.Vertices);
