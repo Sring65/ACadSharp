@@ -170,7 +170,8 @@ namespace ACadSharp.IO.DWG
 			bool suppressBlockExpand = false,
 			Action<CadTemplate> onObjectRead = null,
 			Dictionary<ulong, ObjectByteRange> objectRanges = null,
-			DwgParallelDecodeState parallelState = null) : base(version)
+			DwgParallelDecodeState parallelState = null,
+			bool ownsSectionStream = true) : base(version)
 		{
 			this._builder = builder;
 
@@ -242,11 +243,14 @@ namespace ACadSharp.IO.DWG
 				// [PERF] Lazy page-decompression mode: the section stream is a DwgLazySectionStream — reuse it directly
 				// (do NOT CopyTo the whole image: that would decompress every page upfront and defeat the mode).
 				// Object reads go through its ReadAt (per-page on-demand decompression + predictive prefetch);
-				// the lazy stream owns its own raw-file handle, so this reader is responsible for closing it.
+				// the lazy stream owns its own raw-file handle, so this reader closes it by default;
+				// [PATCH] in the low-memory partial-read path the stream belongs to the caller's context
+				// (SaveLowMemory's buildPatchSource must still read the whole image after this read),
+				// so the caller passes ownsSectionStream:false to keep it open.
 				if (this._reader.Stream is DwgLazySectionStream lazySection)
 				{
 					this._memoryStream = lazySection;
-					this._ownsSectionStream = true;
+					this._ownsSectionStream = ownsSectionStream;
 					this._lazySection = lazySection;
 					this._prefetchDepthPages = Math.Max(1, this._builder.Configuration.LazyPrefetchDepth);
 				}
@@ -1245,6 +1249,15 @@ namespace ACadSharp.IO.DWG
 				template.LastEntityHandle = this.handleReference();
 			}
 
+			// [PATCH] Low-memory partial read: hoisted out of the R2004+ block so the InsertHandles loop below
+			// (R2000+) can share the same suppression decision. Pre-R2004 both sources of suppression are inactive
+			// (noExpand only exists for AC1018+ lazy reads, suppressBlockExpand is only set by AC1018+ callers),
+			// so the hoisted expression is always false there and prior behavior is unchanged.
+			bool suppressOwnedExpand = (this._noExpand != null && this._noExpand.Contains(template.CadObject.Handle))
+				|| (this._suppressBlockExpand
+					&& this._builder.HeaderHandles.MODEL_SPACE != template.CadObject.Handle
+					&& this._builder.HeaderHandles.PAPER_SPACE != template.CadObject.Handle);
+
 			//R2004+:
 			if (this.R2004Plus)
 			{
@@ -1255,10 +1268,6 @@ namespace ACadSharp.IO.DWG
 					// [PATCH] Streaming scan (suppressBlockExpand, spatial index build): *MODEL_SPACE is the index target and
 					// must be expanded; the owned entities of all other block records (block definitions/paper space) are never enqueued --
 					// the index only needs model-space entities (INSERT provides the insertion point; block content is not needed).
-				bool suppressOwnedExpand = (this._noExpand != null && this._noExpand.Contains(template.CadObject.Handle))
-					|| (this._suppressBlockExpand
-						&& this._builder.HeaderHandles.MODEL_SPACE != template.CadObject.Handle
-						&& this._builder.HeaderHandles.PAPER_SPACE != template.CadObject.Handle);
 				for (int i = 0; i < nownedObjects; ++i)
 				{
 					//H[ENTITY(hard owner)] Repeats “Owned Object Count” times.
@@ -1280,7 +1289,12 @@ namespace ACadSharp.IO.DWG
 				for (int i = 0; i < insertCount; ++i)
 				{
 					//Entries	//TODO: necessary to store the insert handles??
-					template.InsertHandles.Add(this.handleReference());
+					// [PATCH] Low-memory partial read: InsertHandles is dead storage on the DWG path (never consumed by the
+					// build or write phases). When child expansion is suppressed (block definitions / paper space in a lazy
+					// read), store the handle values without enqueuing them — otherwise every decoded block record drags all
+					// of its inserted instances (and their subtrees) into the BFS. Full reads are unaffected: the INSERT
+					// objects are already in the BFS and handleReference() dedups against _readedObjects.
+					template.InsertHandles.Add(suppressOwnedExpand ? this._handlesReader.HandleReference() : this.handleReference());
 				}
 				//Layout Handle H(hard pointer)
 				template.LayoutHandle = this.handleReference();
@@ -2407,7 +2421,13 @@ namespace ACadSharp.IO.DWG
 
 			if (template.EntityMode == 0)
 			{
-				template.OwnerHandle = this._handlesReader.HandleReference(entity.Handle);
+				// [PATCH] Low-memory partial read: the mode-0 owner relative handle (VERTEX/ATTRIB/SEQEND, plus the
+				// defining entities of block definitions) must go through handleReference() so it is enqueued for the
+				// BFS. _handlesReader.HandleReference() only stores the value; without the enqueue a partial read leaves
+				// entity.Owner unresolved (null) for mode-0 entities, and the writer then emits a spurious owner
+				// SoftPointer (getEntMode falls back to 0) — a structural bit mismatch that corrupts the re-emitted
+				// record. Full reads are unaffected: the owner block record is already in the BFS and the enqueue dedups.
+				template.OwnerHandle = this.handleReference(entity.Handle);
 			}
 			else if (template.EntityMode == 1)
 			{

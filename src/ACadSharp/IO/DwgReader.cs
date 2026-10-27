@@ -235,12 +235,23 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 	/// <param name="document">The target document to be assembled (a CadDocument created by the caller).</param>
 	/// <param name="seedHandles">The seed handles (typically = all header handles + the needed entity handles).</param>
 	/// <param name="noExpand">When a reference reaches these handles, do not expand their child objects (nullable).</param>
+	/// <param name="suppressBlockExpand">
+	/// [PATCH] Low-memory edit mode: owned entities of block records other than *MODEL_SPACE/*PAPER_SPACE are
+	/// stored but not enqueued (the decoded set stays proportional to the seed set + explicit entity handles).
+	/// </param>
+	/// <param name="objectRanges">
+	/// [PATCH] When non-null, each decoded object's byte range in the decompressed objects section is recorded
+	/// into this dictionary (handle → offset/length including the size prefix and CRC). The low-memory splicer
+	/// consumes it; full reads pass null.
+	/// </param>
 	/// <returns>The assembled document.</returns>
 	public CadDocument ReadObjectsPartial(
 		DwgPartialReadContext ctx,
 		CadDocument document,
 		Queue<ulong> seedHandles,
-		HashSet<ulong> noExpand = null)
+		HashSet<ulong> noExpand = null,
+		bool suppressBlockExpand = false,
+		Dictionary<ulong, ObjectByteRange> objectRanges = null)
 	{
 		// [PATCH] Reuse this._builder / this._document created by PreparePartialRead (same path as the
 		// full read readObjects: the same builder has read header/classes, so its state is complete).
@@ -259,7 +270,12 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 			seedHandles,
 			ctx.HandleMap,
 			ctx.Classes,
-			noExpand);
+			noExpand,
+			suppressBlockExpand: suppressBlockExpand,
+			objectRanges: objectRanges,
+			// [PATCH] 惰性对象段流归调用方上下文（ctx.ObjectsStream）所有：本读者不得关闭，
+			// 否则 SaveLowMemory 的 buildPatchSource 后续整映像顺序读会命中 "Cannot access a closed file"。
+			ownsSectionStream: false);
 
 		sectionReader.Read();
 
@@ -303,7 +319,9 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 			ctx.HandleMap,
 			ctx.Classes,
 			suppressBlockExpand: true,
-			onObjectRead: t => onObject(builder, t));
+			onObjectRead: t => onObject(builder, t),
+			// [PATCH] 同 ReadObjectsPartial：惰性对象段流归 ctx 所有，扫描结束不得关闭。
+			ownsSectionStream: false);
 
 		sectionReader.Read();
 	}
@@ -1684,6 +1702,49 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 				return;
 			}
 
+			// [PATCH] 低内存路径（SaveLowMemory）不要求调用方开启 RetainPatchSource：惰性路径仅在
+			// RetainPatchSource=true 时扫描页头，否则 PageSize 保持 0，下面的原始页快照无法构建
+			// （rawLength=0 → 空快照 → 拼接器无页可复用）。缺页头元数据时按需做"仅头部扫描"
+			// （与 RetainPatchSource 扫描同布局：32B XOR 头 0x4164536B^seeker，不解压页体，~27.7k 页约 0.1-0.2s）。
+			// 与该扫描的两点差异：不覆盖 Offset（checksum+startOffset 覆盖会破坏下面按解压偏移的排序）、
+			// 不移动原始文件流游标（调用方后续读取自行 seek）。
+			bool needScan = false;
+			foreach (DwgLocalSectionMap s in descriptor.LocalSections)
+			{
+				if (!s.IsEmpty && s.PageSize == 0)
+				{
+					needScan = true;
+					break;
+				}
+			}
+			if (needScan)
+			{
+				byte[] pageHdr = new byte[32];
+				foreach (DwgLocalSectionMap section in descriptor.LocalSections)
+				{
+					if (section.IsEmpty)
+						continue;
+					this._fileStream.Stream.Position = section.Seeker;
+					int readTotal = 0;
+					while (readTotal < 32)
+					{
+						int n = this._fileStream.Stream.Read(pageHdr, readTotal, 32 - readTotal);
+						if (n <= 0)
+							break;
+						readTotal += n;
+					}
+					if (readTotal < 32)
+						throw new EndOfStreamException($"页 {section.Seeker} 头部读取不完整（期望 32，实得 {readTotal}）");
+					int secMask = 0x4164536B ^ (int)section.Seeker;
+					uint csize = (uint)BitConverter.ToInt32(pageHdr, 8);
+					uint psize = (uint)BitConverter.ToInt32(pageHdr, 12);
+					uint dataChecksum = (uint)BitConverter.ToInt32(pageHdr, 24);
+					section.CompressedSize = (ulong)(csize ^ (uint)secMask);
+					section.PageSize = (int)(int)(psize ^ (uint)secMask);
+					section.Checksum = dataChecksum ^ (uint)secMask;
+				}
+			}
+
 			//Total length of the decompressed image = the sum of each page's decompressed size (the last page may be less than a full page; the temp file's pre-allocated length may be larger than this value)
 			long sectionLength = 0L;
 			foreach (DwgLocalSectionMap section in descriptor.LocalSections)
@@ -1894,5 +1955,211 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 			}
 			++n;
 		}
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────────
+	// [PATCH] 低内存编辑模式：SaveLowMemory（拼接策略）
+	// ─────────────────────────────────────────────────────────────────────────────
+
+	/// <summary>
+	/// [PATCH] 低内存编辑模式第 3 步：把就地修改后的文档保存到 <paramref name="outputPath"/>。
+	/// <para>
+	/// 只重序列化脏对象集合（<paramref name="dirtyObjects"/>，须已就地修改且属于本读取器的部分文档），
+	/// 对象段其余内容从源文件逐字节拼接：未触碰的页直接复用原文件的压缩页字节（仅重掩 32 字节页头），
+	/// 其余各节按原样写回（解压字节原样，压缩节按相同页大小重新 LZ77）。
+	/// </para>
+	/// <para>
+	/// 前置条件：已调用 <see cref="PreparePartialRead"/> + <see cref="ReadObjectsPartial"/>（部分文档存在），
+	/// 且读取器尚未 Dispose（原始文件流仍打开，用于压缩页快照）。
+	/// </para>
+	/// <para>
+	/// 限制：仅支持 R2004（AC1018）；仅就地修改（不新增 handle）。
+	/// 不支持对象增删，也不支持重序列化块定义（BlockRecord）——见 <c>DwgObjectWriter.SerializeDirtyObjects</c>。
+	/// </para>
+	/// </summary>
+	/// <param name="ctx"><see cref="PreparePartialRead"/> 返回的上下文（重定位的 handle 会就地更新其 HandleMap）。</param>
+	/// <param name="dirtyObjects">已就地修改的脏对象集合（实体，或块定义的 BLOCK/ENDBLK 框架实体）。</param>
+	/// <param name="outputPath">输出文件路径（不存在则创建，存在则覆盖）。</param>
+	/// <returns>保存统计（页复用 / 重定位 / 就地覆盖计数等）。</returns>
+	public DwgLowMemorySaveResult SaveLowMemory(DwgPartialReadContext ctx, CadObject[] dirtyObjects, string outputPath)
+	{
+		if (ctx == null)
+		{
+			throw new ArgumentNullException(nameof(ctx));
+		}
+		if (dirtyObjects == null || dirtyObjects.Length == 0)
+		{
+			throw new ArgumentException("低内存模式：脏对象集合不能为空", nameof(dirtyObjects));
+		}
+		if (string.IsNullOrEmpty(outputPath))
+		{
+			throw new ArgumentNullException(nameof(outputPath));
+		}
+		if (this._document == null || this._document.RootDictionary == null)
+		{
+			throw new InvalidOperationException("低内存模式：尚未调用 ReadObjectsPartial（部分文档不存在）");
+		}
+		DwgFileHeaderAC18 ac18Src = this._fileHeader as DwgFileHeaderAC18;
+		if (ac18Src == null || ac18Src.AcadVersion != ACadVersion.AC1018)
+		{
+			throw new NotSupportedException($"低内存模式目前仅支持 R2004（AC1018），当前文件版本为 {this._fileHeader?.AcadVersion}");
+		}
+
+		// (1) 补丁源：对象段影像临时文件 + 原始压缩页快照临时文件（均 DeleteOnClose，自动清理）
+		this.buildPatchSource(new Dictionary<ulong, ObjectByteRange>(), ctx.ObjectsStream);
+		if (this.PatchSource == null)
+		{
+			throw new InvalidDataException("低内存模式：对象段补丁源构建失败（buildPatchSource 未设置 PatchSource，详见通知日志）");
+		}
+
+		// (2) 重序列化脏对象集合（每条记录经 registerObject 成形：MS 尺寸前缀 + 主体 + CRC16）
+		// NOTE: 命名参数必须与声明完全同大小写 —— SDK 10.0.401 附带的预览 csc 5.9 对命名参数做大小写敏感匹配
+		//（违反 C# 规范），不同大小写会报 CS1739（已用最小样例复现）。
+		var (dirtyBytes, dirtyMap) = ACadSharp.IO.DWG.DwgObjectWriter.SerializeDirtyObjects(
+			this._document,
+			this._encoding,
+			dirtyObjects,
+			writeXRecords: true,
+			writeXData: true,
+			writeShapes: true,
+			writeDynamicParameters: false);
+
+		// (3) 拼接：等长就地覆盖 / 缩短补零 / 变长追加重定位（重定位就地写回 ctx.HandleMap）
+		DwgObjectsSectionSplicer.Result splice = DwgObjectsSectionSplicer.Splice(this.PatchSource, ctx.HandleMap, dirtyBytes, dirtyMap);
+
+		FileStream outStream = null;
+		try
+		{
+			// (4) 写入器只需要版本串 / 维护版本 / 代码页，一个桩文档即可（真实文档不参与落盘）
+			var stub = new CadDocument(ctx.Version);
+			stub.Header.MaintenanceVersion = ctx.Header.MaintenanceVersion;
+			stub.Header.CodePage = string.IsNullOrEmpty(ctx.Header.CodePage) ? "ANSI_1252" : ctx.Header.CodePage;
+
+			outStream = new FileStream(outputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 1 << 20);
+			var writer = new ACadSharp.IO.DWG.DwgStreamWriters.DwgFileHeaderWriterAC18(outStream, this._encoding, stub);
+
+			// (5) 节顺序严格对齐生产 R2004 写入器（DwgWriter）：
+			// AppInfo → Preview → SummaryInfo → RevHistory → [AcDbObjects] → ObjFreeSpace → Template → [Handles] → Classes → AuxHeader → Header
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.AppInfo, 0x80, required: true);
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.Preview, 0x400, required: true);
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.SummaryInfo, 0x100, required: true);
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.RevHistory, 0x7400, required: false);
+
+			writer.AddSectionWithPageReuse(DwgSectionDefinition.AcDbObjects, splice.FinalStream, this.PatchSource, splice.ReusePage);
+
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.ObjFreeSpace, 0x7400, required: false);
+			// Template：源节无页（如英文单位 4B 全零载荷被零尾页规则跳过 → 源描述符 u64=4/pc=0）时，
+			// 按生产写入器语义补写 4B 载荷 [Int16 0][UInt16 MEASUREMENT]：英文 → 零尾页跳过 → u64=4/pc=0
+			// （与源描述符逐字节一致）；公制 → 非零尾页落盘 → u64=4/pc=1。
+			if (!ac18Src.Descriptors.TryGetValue(DwgSectionDefinition.Template, out DwgSectionDescriptor templateDesc)
+				|| templateDesc.LocalSections.Count == 0)
+			{
+				using (var templateStream = new MemoryStream(4))
+				{
+					StreamIO templateWriter = new StreamIO(templateStream);
+					templateWriter.Write<short>(0); // Template 描述串长度（ODA 恒写 0）
+					templateWriter.Write<ushort>((ushort)ctx.Header.MeasurementUnits); // 0=English, 1=Metric
+					templateStream.Position = 0;
+					writer.AddSection(DwgSectionDefinition.Template, templateStream, true, 0x7400);
+				}
+			}
+			else
+			{
+				this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.Template, 0x7400, required: false);
+			}
+
+			// Handles：用（可能已重定位的）handle 映射重建；纯就地修改不新增 handle，$HANDSEED/$HANDLESIZE 不变
+			var handleStream = new MemoryStream();
+			new DwgHandleWriter(ctx.Version, handleStream, ctx.HandleMap).Write(writer.HandleSectionOffset);
+			handleStream.Position = 0;
+			writer.AddSection(DwgSectionDefinition.Handles, handleStream, true);
+			handleStream.Dispose();
+
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.Classes, 0x7400, required: true);
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.AuxHeader, 0x7400, required: false);
+			this.addLowMemoryVerbatimSection(writer, ac18Src, DwgSectionDefinition.Header, 0x7400, required: true);
+
+			// (6) 文件头 + 节表 + 页表（writeFileMetaData 依赖 Preview/SummaryInfo/AppInfo 存在）
+			writer.WriteFile();
+			outStream.Dispose();
+			outStream = null;
+		}
+		catch
+		{
+			if (outStream != null)
+			{
+				outStream.Dispose();
+				outStream = null;
+				// 失败时删除半成品输出文件，避免残留损坏文件
+				try
+				{
+					File.Delete(outputPath);
+				}
+				catch
+				{
+					//尽力而为
+				}
+			}
+			throw;
+		}
+		finally
+		{
+			splice.FinalStream.Dispose();
+		}
+
+		return new DwgLowMemorySaveResult
+		{
+			OutputPath = outputPath,
+			SourcePages = this.PatchSource.Pages.Length,
+			TotalPages = splice.TotalPages,
+			ReusedPages = splice.ReusedPages,
+			SectionLength = splice.SectionLength,
+			AppendedBytes = splice.AppendedBytes,
+			InPlaceObjects = splice.InPlaceObjects,
+			RelocatedObjects = splice.RelocatedObjects,
+			UnchangedObjects = splice.UnchangedObjects
+		};
+	}
+
+	/// <summary>
+	/// [PATCH] 低内存模式：把源文件的一个非对象段按原样写回新文件
+	/// （解压字节原样；源段为压缩时按相同页大小重新 LZ77——内容字节级一致）。
+	/// </summary>
+	/// <param name="writer">目标文件头写入器。</param>
+	/// <param name="source">源文件头（提供节描述符：存在性与压缩方式）。</param>
+	/// <param name="sectionName">节名（<see cref="DwgSectionDefinition"/>）。</param>
+	/// <param name="decompsize">页大小（与生产写入器一致：AppInfo 0x80 / Preview 0x400 / SummaryInfo 0x100 / 其余 0x7400）。</param>
+	/// <param name="required">该节是否必须存在（Preview/SummaryInfo/AppInfo 被 writeFileMetaData 引用，必须存在）。</param>
+	private void addLowMemoryVerbatimSection(
+		ACadSharp.IO.DWG.DwgStreamWriters.DwgFileHeaderWriterAC18 writer,
+		DwgFileHeaderAC18 source,
+		string sectionName,
+		int decompsize,
+		bool required)
+	{
+		if (!source.Descriptors.TryGetValue(sectionName, out DwgSectionDescriptor sourceDescriptor)
+			|| sourceDescriptor.LocalSections.Count == 0)
+		{
+			if (required)
+			{
+				throw new InvalidOperationException($"低内存模式：源文件缺少 {sectionName} 节或该节为空（输出文件结构要求该节必须存在）");
+			}
+			return;
+		}
+
+		IDwgStreamReader sreader = this.getSectionStream(sectionName);
+		if (sreader == null)
+		{
+			throw new InvalidOperationException($"低内存模式：读取 {sectionName} 节失败");
+		}
+		// NOTE: the section stream is kept by the writer (read lazily during WriteFile), so it must NOT be
+		// disposed here — same lifetime pattern as readAppInfo/readAuxHeader/readClasses.
+		writer.AddSection(sectionName, sreader.Stream, sourceDescriptor.CompressedCode == 2, decompsize);
+
+		// [FIX] AddSection 把描述符 u64（CompressedSize）写成（补零到整页的）缓冲长度，而 AutoCAD 严格
+		// 解析要求它 = 源文件的真实节大小。被 AutoCAD 接受的文件全部遵循该不变式：写整页 + 真实 u64，
+		// 读端按 u64 % pageDecomp 截断末页（多读到的尾部是零填充）。页字节保持不变（仍写整页），
+		// 仅把描述符 u64 恢复为源文件的真实值。
+		writer.FileHeader.Descriptors[sectionName].CompressedSize = sourceDescriptor.CompressedSize;
 	}
 }
