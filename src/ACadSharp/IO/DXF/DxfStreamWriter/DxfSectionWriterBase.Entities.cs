@@ -32,6 +32,9 @@ internal abstract partial class DxfSectionWriterBase
 			case Arc arc:
 				this.writeArc(arc);
 				break;
+			case CadBody cadBody:
+				this.writeModelerGeometry(cadBody);
+				break;
 			case Circle circle:
 				this.writeCircle(circle);
 				break;
@@ -112,11 +115,17 @@ internal abstract partial class DxfSectionWriterBase
 			case Ray ray:
 				this.writeRay(ray);
 				break;
+			case Region region:
+				this.writeModelerGeometry(region);
+				break;
 			case Shape shape:
 				this.writeShape(shape);
 				break;
 			case Solid solid:
 				this.writeSolid(solid);
+				break;
+			case Solid3D solid3D:
+				this.writeSolid3D(solid3D);
 				break;
 			case Spline spline:
 				this.writeSpline(spline);
@@ -160,13 +169,13 @@ internal abstract partial class DxfSectionWriterBase
 			case UnknownEntity:
 			case MechanicalEntity:
 			case Wall:
+			case Solid3D when this.Version < ACadVersion.AC1014:
+			case CadBody when this.Version < ACadVersion.AC1014:
+			case Region when this.Version < ACadVersion.AC1014:
 				return false;
 			case Shape:
 				return this.Configuration.WriteShapes;
 			case TableEntity:
-			case Solid3D:
-			case CadBody:
-			case Region:
 			case Surface:
 				this.notify($"Entity type not implemented {entity.GetType().FullName}", NotificationType.NotImplemented);
 				return false;
@@ -521,6 +530,44 @@ internal abstract partial class DxfSectionWriterBase
 		this._writer.Write(42, ellipse.EndParameter, map);
 	}
 
+	private void writeEncryptedSAT(ModelerGeometry geometry)
+	{
+		var acisText = geometry.GetAcisText();
+		if (string.IsNullOrEmpty(acisText))
+		{
+			this.notify($"Encrypted SAT not found for {geometry.ObjectName}: {geometry.Handle}.", NotificationType.Warning);
+			return;
+		}
+
+		int CHUNK = 255;
+		foreach (string line in acisText.Split('\n'))
+		{
+			string trimmed = line.TrimEnd('\r');
+			if (trimmed.Length == 0)
+			{
+				continue;
+			}
+
+			string encoded = AcisTextCodec.Decode(trimmed);
+			int offset = 0;
+			while (offset < encoded.Length)
+			{
+				int length = Math.Min(CHUNK, encoded.Length - offset);
+				if (offset + length < encoded.Length)
+				{
+					int space = encoded.LastIndexOf(' ', offset + length - 1, length);
+					if (space > offset)
+					{
+						length = space - offset + 1;
+					}
+				}
+
+				this._writer.Write(offset == 0 ? 1 : 3, encoded.Substring(offset, length));
+				offset += length;
+			}
+		}
+	}
+
 	private void writeFace3D(Face3D face)
 	{
 		DxfClassMap map = DxfClassMap.Create<Face3D>();
@@ -549,7 +596,7 @@ internal abstract partial class DxfSectionWriterBase
 
 		this._writer.Write(210, hatch.Normal, map);
 
-		this._writer.Write(2, hatch.Pattern.Name, map);
+		this._writer.Write(2, hatch.Pattern?.Name, map);
 
 		this._writer.Write(70, hatch.IsSolid ? (short)1 : (short)0, map);
 		this._writer.Write(71, hatch.IsAssociative ? (short)1 : (short)0, map);
@@ -560,12 +607,16 @@ internal abstract partial class DxfSectionWriterBase
 			this.writeBoundaryPath(path);
 		}
 
+		this._writer.Write(75, (short)hatch.Style);
+		this._writer.Write(76, (short)hatch.PatternType);
+
 		this.writeHatchPattern(hatch, hatch.Pattern);
 
 		// [PATCH] AutoCAD omits code 47 when the pixel size is 0 (the source and the
 		// reference files carry no 47 for these hatches); upstream wrote 47=0 for every
 		// non-solid hatch.
-		if (hatch.PixelSize != 0)
+		// Upstream v3.8.36 additionally writes 47 for hatches with derived boundary paths.
+		if (hatch.PixelSize != 0.0 || hatch.Paths.Any(p => p.Flags.HasFlag(BoundaryPathFlags.Derived)) || hatch.PixelSize != 0)
 		{
 			this._writer.Write(47, hatch.PixelSize, map);
 		}
@@ -592,7 +643,8 @@ internal abstract partial class DxfSectionWriterBase
 		// losing the gradient fill of solid hatches on every DXF save. AutoCAD leaves
 		// the gradient untouched by a TransformBy, so the stored values are written as is.
 		HatchGradientPattern gradient = hatch.GradientColor;
-		if (gradient == null || !gradient.Enabled)
+		if (gradient == null || !gradient.Enabled
+			|| (hatch.Pattern != null && hatch.Pattern.Lines.Count > 0))
 		{
 			return;
 		}
@@ -742,8 +794,10 @@ internal abstract partial class DxfSectionWriterBase
 
 	private void writeHatchPattern(Hatch hatch, HatchPattern pattern)
 	{
-		this._writer.Write(75, (short)hatch.Style);
-		this._writer.Write(76, (short)hatch.PatternType);
+		if (pattern == null || pattern.Lines.Count == 0)
+		{
+			return;
+		}
 
 		if (!hatch.IsSolid)
 		{
@@ -1046,6 +1100,33 @@ internal abstract partial class DxfSectionWriterBase
 		}
 	}
 
+	private void writeModelerGeometry(ModelerGeometry geometry)
+	{
+		DxfClassMap map = DxfClassMap.Create<ModelerGeometry>();
+
+		this._writer.Write(DxfCode.Subclass, DxfSubclassMarker.ModelerGeometry);
+
+		if (this.Version >= ACadVersion.AC1027)
+		{
+			this._writer.Write(290, geometry.Guid != System.Guid.Empty ? (short)1 : (short)0, map);
+			this._writer.Write(2, geometry.Guid.ToString("B"), map);
+			return;
+		}
+
+		this._writer.Write(70, geometry.ModelerFormatVersion, map);
+
+		if (geometry.IsBinaryAcisData)
+		{
+			//Encrypted sab
+			this.notify($"Encrypted SAB data is not supported in DXF version {this.Version}.", NotificationType.Warning);
+		}
+		else
+		{
+			//Encrypted sat
+			this.writeEncryptedSAT(geometry);
+		}
+	}
+
 	private void writeMText(MText mtext, bool writeSubclass = true)
 	{
 		DxfClassMap map = DxfClassMap.Create<MText>();
@@ -1265,7 +1346,10 @@ internal abstract partial class DxfSectionWriterBase
 		this._writer.Write(73, 3, map);//Undocumented
 
 		this._writer.Write(90, ole.BinaryData.Length, map);
-		this._writer.Write(310, ole.BinaryData, map);
+		if (ole.BinaryData.Length > 0)
+		{
+			this._writer.Write(310, ole.BinaryData, map);
+		}
 		this._writer.Write(1, "OLE");
 	}
 
@@ -1658,6 +1742,17 @@ internal abstract partial class DxfSectionWriterBase
 		this._writer.Write(39, solid.Thickness, map);
 
 		this._writer.Write(210, solid.Normal, map);
+	}
+
+	private void writeSolid3D(Solid3D solid)
+	{
+		this.writeModelerGeometry(solid);
+
+		if (this.Version >= ACadVersion.AC1021)
+		{
+			this._writer.Write(DxfCode.Subclass, DxfSubclassMarker.Solid3D);
+			this._writer.Write(350, (ulong)0);
+		}
 	}
 
 	private void writeSpline(Spline spline)

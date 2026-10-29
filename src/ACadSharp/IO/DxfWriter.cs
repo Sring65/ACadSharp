@@ -1,4 +1,5 @@
-﻿using ACadSharp.Entities;
+﻿using ACadSharp.DataStorage;
+using ACadSharp.Entities;
 using ACadSharp.IO.DXF;
 using ACadSharp.IO.DXF.DxfStreamWriter;
 using ACadSharp.Objects;
@@ -150,6 +151,22 @@ public partial class DxfWriter : CadWriterBase<DxfWriterConfiguration>
 
 	private void writeACDSData()
 	{
+		if (this._document.Header.Version <= ACadVersion.AC1024 
+			|| !this.Configuration.WriteACISData)
+		{
+			return;
+		}
+
+		var dataStorage = this._document.CreateDataStorage();
+		if (dataStorage == null)
+		{
+			return;
+		}
+
+		var writer = new DxfAcdsDataSectionWriter(dataStorage, this._writer, this._document, this._objectHolder, this.Configuration);
+		writer.OnNotification += this.triggerNotification;
+
+		writer.Write();
 	}
 
 	private void writeBlocks()

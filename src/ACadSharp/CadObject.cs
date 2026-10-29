@@ -26,7 +26,23 @@ public abstract class CadObject : IHandledCadObject
 	/// <summary>
 	/// Extended data attached to this object.
 	/// </summary>
-	public ExtendedDataDictionary ExtendedData { get; private set; }
+	public ExtendedDataDictionary ExtendedData
+	{
+		get
+		{
+			if (this._extendedData == null)
+			{
+				this._extendedData = new ExtendedDataDictionary(this);
+			}
+
+			return this._extendedData;
+		}
+
+		private set
+		{
+			this._extendedData = value;
+		}
+	}
 
 	/// <inheritdoc/>
 	/// <remarks>
@@ -63,6 +79,11 @@ public abstract class CadObject : IHandledCadObject
 	{
 		get
 		{
+			if (this._reactors == null)
+			{
+				this._reactors = new List<CadObject>();
+			}
+
 			return this._reactors;
 		}
 	}
@@ -103,7 +124,9 @@ public abstract class CadObject : IHandledCadObject
 		}
 	}
 
-	private List<CadObject> _reactors = new List<CadObject>();
+	private ExtendedDataDictionary _extendedData = null;
+
+	private List<CadObject> _reactors = null;
 
 	private CadDictionary _xdictionary = null;
 
@@ -112,7 +135,6 @@ public abstract class CadObject : IHandledCadObject
 	/// </summary>
 	public CadObject()
 	{
-		this.ExtendedData = new ExtendedDataDictionary(this);
 	}
 
 	/// <summary>
@@ -124,6 +146,11 @@ public abstract class CadObject : IHandledCadObject
 	/// <param name="reactor"></param>
 	public void AddReactor(CadObject reactor)
 	{
+		if (this._reactors == null)
+		{
+			this._reactors = new List<CadObject>();
+		}
+
 		this._reactors.Add(reactor);
 	}
 
@@ -132,6 +159,11 @@ public abstract class CadObject : IHandledCadObject
 	/// </summary>
 	public void CleanReactors()
 	{
+		if (this._reactors == null)
+		{
+			return;
+		}
+
 		var reactors = this._reactors.ToList();
 		foreach (var reactor in reactors)
 		{
@@ -159,16 +191,21 @@ public abstract class CadObject : IHandledCadObject
 		clone.Owner = null;
 
 		//Collections
-		clone._reactors = new List<CadObject>();
-		// [PATCH] Upstream replaces ExtendedData with an EMPTY dictionary, silently dropping all
-		// XData on clone (MemberwiseClone alone would share the original's internal dictionary,
-		// hence the replacement). The downstream consumer's cross-document clones (external DXF blocks, e.g. the
-		// frame logo with gradient-hatch XData) rely on the clone keeping its XData; the target
-		// document re-keys the AppId entries on registration. Copy the entries (value objects are
-		// read-only during writing, so sharing them is safe).
-		clone.ExtendedData = new ExtendedDataDictionary(clone);
-		foreach (var kv in this.ExtendedData)
-			clone.ExtendedData.Add(kv.Key, kv.Value);
+		clone._reactors = null;
+		// [PATCH] Upstream lazily initializes ExtendedData (null = created on demand), which would
+		// silently drop all XData on clone (MemberwiseClone alone would share the original's
+		// internal dictionary, hence the explicit null). The downstream consumer's cross-document
+		// clones (external DXF blocks, e.g. the frame logo with gradient-hatch XData) rely on the
+		// clone keeping its XData; the target document re-keys the AppId entries on registration.
+		// Copy the entries (value objects are read-only during writing, so sharing them is safe).
+		if (this._extendedData != null)
+		{
+			clone._extendedData = new ExtendedDataDictionary(clone);
+			foreach (var kv in this.ExtendedData)
+			{
+				clone._extendedData.Add(kv.Key, kv.Value);
+			}
+		}
 		clone.XDictionary = this._xdictionary?.CloneTyped();
 
 		return clone;
@@ -230,7 +267,7 @@ public abstract class CadObject : IHandledCadObject
 	/// <returns></returns>
 	public bool RemoveReactor(CadObject reactor)
 	{
-		return this._reactors.Remove(reactor);
+		return this._reactors?.Remove(reactor) ?? false;
 	}
 
 	/// <inheritdoc/>
@@ -301,7 +338,7 @@ public abstract class CadObject : IHandledCadObject
 			}
 		}
 
-		this._reactors.Clear();
+		this._reactors?.Clear();
 	}
 
 	protected T updateCollectionEntry<T>(T entry, Action<T> assignValue, ObjectDictionaryCollection<T> collection)

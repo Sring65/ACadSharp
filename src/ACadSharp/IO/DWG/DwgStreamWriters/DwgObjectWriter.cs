@@ -236,9 +236,6 @@ internal partial class DwgObjectWriter : DwgSectionIO
 			// DwgObjectWriter.Entities.cs), so tables round-trip in R2004 DWGs.
 			case Wall:
 			case MechanicalEntity:
-			case Solid3D:
-			case CadBody:
-			case Region:
 			case Surface:
 				this.notify($"Entity type not implemented {entity.GetType().FullName}", NotificationType.NotImplemented);
 				return false;
@@ -644,7 +641,7 @@ internal partial class DwgObjectWriter : DwgSectionIO
 			//[DBG] Anonymous block name write debugging
 			if (Environment.GetEnvironmentVariable("ACADSHARP_DBG_BH") == "1")
 				Console.Error.WriteLine($"[BH-DBG] handle={record.Handle:X} name='{record.Name}' len={record.Name?.Length} anon={record.Flags.HasFlag(BlockTypeFlags.Anonymous)}");
-			this._writer.WriteVariableText(record.Name.Substring(0, 2));
+			this._writer.WriteVariableText(record.Name.Substring(0, Math.Min(2, record.Name.Length)));
 		}
 		else if (record.Layout != null)
 		{

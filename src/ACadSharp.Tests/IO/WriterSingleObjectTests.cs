@@ -107,6 +107,7 @@ public abstract class WriterSingleObjectTests : IOTestsBase
 		Data.Add(new(nameof(SingleCaseGenerator.LeaderWithArrowHead)));
 		Data.Add(new(nameof(SingleCaseGenerator.SortedXRecords)));
 		Data.Add(new(nameof(SingleCaseGenerator.ProxyGraphics)));
+		Data.Add(new(nameof(SingleCaseGenerator.AnonymousBlockWithShortName)));
 	}
 
 	public WriterSingleObjectTests(ITestOutputHelper output) : base(output)
@@ -357,6 +358,11 @@ public abstract class WriterSingleObjectTests : IOTestsBase
 				Assert.Equal(vp1.Width, result1.Width);
 				Assert.Equal(vp2.Height, result2.Height);
 			};
+		}
+
+		public void AnonymousBlockWithShortName()
+		{
+			this.Document.BlockRecords.Add(new BlockRecord("顶") { IsAnonymous = true });
 		}
 
 		public void ArcSegments()
@@ -1912,6 +1918,13 @@ public abstract class WriterSingleObjectTests : IOTestsBase
 			Wipeout w = new Wipeout();
 			w.ClipBoundaryVertices.Clear();
 			this.Document.Entities.Add(w);
+
+			//Invalid for dwg but not dxf, it simplifies the setter too
+			var blk = new BlockRecord("block1");
+			blk.Entities.Add(new Line(XYZ.Zero, new XYZ(10, 10, 0)));
+			Insert insert = new Insert(blk);
+			insert.XScale = 0;
+			this.Document.Entities.Add(insert);
 
 			//Empty file
 
