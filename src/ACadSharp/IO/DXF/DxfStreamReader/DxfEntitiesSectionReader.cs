@@ -21,6 +21,10 @@ namespace ACadSharp.IO.DXF
 			// grows far beyond the live size). 0 disables (upstream behavior).
 			int gcEvery = this._builder.Configuration.GCEveryNEntities;
 			int gcCounter = 0;
+			// [PATCH] Auto-degrade: when the memory pressure stays high, the cadence is
+			// tightened once (quarter, floor 10K) so the working set tracks the live graph
+			// more closely (AutoDegradeOnMemoryPressure).
+			bool autoTightened = false;
 
 			//Loop until the section ends
 			while (this._reader.ValueAsString != DxfFileToken.EndSection)
@@ -52,6 +56,20 @@ namespace ACadSharp.IO.DXF
 				{
 					gcCounter = 0;
 					MemoryTrimmer.Trim();
+
+					// [PATCH] Auto-degrade: re-probe after the trim; if the pressure is still high
+					// (GC load / available memory >= MemoryTrimmer.DefaultPressureRatio), tighten the
+					// cadence once (quarter, floor 10K). The probe is a single GC.GetGCMemoryInfo call.
+					if (this._builder.Configuration.AutoDegradeOnMemoryPressure && !autoTightened && gcEvery > 10000)
+					{
+						MemoryTrimmer.PressureInfo pressure = MemoryTrimmer.GetPressureInfo();
+						if (pressure.Probed && pressure.Ratio >= MemoryTrimmer.DefaultPressureRatio)
+						{
+							autoTightened = true;
+							gcEvery = Math.Max(10000, gcEvery / 4);
+							MemoryTrimmer.Log?.Invoke($"[ACadSharp] DXF memory pressure {pressure.Ratio:0.00} (load {pressure.MemoryLoadBytes / 1024 / 1024}MB / available {pressure.TotalAvailableMemoryBytes / 1024 / 1024}MB) -> GC cadence tightened to every {gcEvery} entities");
+						}
+					}
 				}
 
 				//Add the object and the template to the builder

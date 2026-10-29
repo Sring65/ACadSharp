@@ -638,12 +638,12 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 
 	/// <summary>
 	/// [PATCH] Factory for the storage location of the decompressed image (objects section).
-	/// When UseDiskSectionCache=true and the section is the objects section, returns a temp-file FileStream
+	/// When <paramref name="diskCache"/> is true and the section is the objects section, returns a temp-file FileStream
 	/// (length pre-allocated, DeleteOnClose); otherwise returns an in-memory-resident HugeMemoryStream (the original behavior).
 	/// </summary>
-	private Stream CreateSectionBuffer(string sectionName, long length)
+	private Stream CreateSectionBuffer(string sectionName, long length, bool diskCache = false)
 	{
-		if (this.Configuration.UseDiskSectionCache && sectionName == DwgSectionDefinition.AcDbObjects)
+		if (diskCache && sectionName == DwgSectionDefinition.AcDbObjects)
 		{
 			string path = Path.Combine(Path.GetTempPath(), "acsh_" + Guid.NewGuid().ToString("N") + ".tmp");
 			FileStream fs = new FileStream(
@@ -665,27 +665,71 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 		if (!fileheader.Descriptors.TryGetValue(sectionName, out DwgSectionDescriptor descriptor))
 			return null;
 
-		// [PERF] 惰性页解压读模式（UseLazyObjectSection）：只建页目录（零额外磁盘 I/O），不解压任何页；
-		// DwgObjectReader 读对象时按需逐页解压，并按读取顺序异步多线程预解压后续页。
-		// 与 ParallelDecode（并行解码需整节只读映像）/ UseDiskSectionCache（整节磁盘映像）互斥——同时开启时回退 eager 并提示。
+		// [PERF] Lazy page-decompression read mode (UseLazyObjectSection): build only the page directory (zero extra disk I/O)
+		// and decompress no page up front; DwgObjectReader decompresses a page on demand as it reads the objects in it and
+		// prefetches the following pages asynchronously (multi-threaded, in read order).
+		// Mutually exclusive with ParallelDecode (parallel decoding needs the whole read-only section image) and
+		// UseDiskSectionCache (whole-section disk image) - when combined with either, falls back to eager with a hint.
+		bool useLazy = this.Configuration.UseLazyObjectSection;
+		bool useDisk = this.Configuration.UseDiskSectionCache;
+
+		// [PATCH] Auto-degrade (AutoDegradeOnMemoryPressure): when the caller has not chosen a strategy explicitly and the
+		// in-memory section image would be dangerous (measured memory pressure, or the image size beyond the budget),
+		// switch to a low-memory strategy BEFORE decompressing:
+		//   - lazy page decompression (AC1018/AC1024/AC1027/AC1032: compressed section on a file stream)
+		//   - on-disk section cache otherwise (e.g. R2007/AC1021, where the lazy stream is unavailable)
 		if (sectionName == DwgSectionDefinition.AcDbObjects
-			&& this.Configuration.UseLazyObjectSection
+			&& this.Configuration.AutoDegradeOnMemoryPressure
+			&& !useLazy && !useDisk && !this.Configuration.ParallelDecode)
+		{
+			long imageBytes = (long)descriptor.DecompressedSize * descriptor.LocalSections.Count;
+			long sizeThreshold = this.Configuration.AutoDegradeSectionSizeBytes > 0
+				? this.Configuration.AutoDegradeSectionSizeBytes
+				: 4L * 1024 * 1024 * 1024; // 4GB
+			MemoryTrimmer.PressureInfo pressure = MemoryTrimmer.GetPressureInfo();
+			bool sizeDanger = imageBytes >= sizeThreshold;
+			bool pressureDanger = pressure.Probed && pressure.Ratio >= MemoryTrimmer.DefaultPressureRatio;
+
+			if (sizeDanger || pressureDanger)
+			{
+				// The lazy stream is only implemented for the R2004+ page layout; R2007 (AC1021) and the
+				// non-compressed / non-file-stream cases fall back to the on-disk section cache instead.
+				bool lazyAvailable = descriptor.IsCompressed
+					&& this._fileStream.Stream is FileStream
+					&& (fileheader.AcadVersion == ACadVersion.AC1018
+						|| fileheader.AcadVersion == ACadVersion.AC1024
+						|| fileheader.AcadVersion == ACadVersion.AC1027
+						|| fileheader.AcadVersion == ACadVersion.AC1032);
+
+				if (lazyAvailable)
+					useLazy = true;
+				else
+					useDisk = true;
+
+				Console.Error.WriteLine($"[ACadSharp] AutoDegradeOnMemoryPressure: objects-section image ~{imageBytes / 1024 / 1024}MB, pressure {(pressure.Probed ? pressure.Ratio.ToString("0.00") : "n/a")}, version {fileheader.AcadVersion} -> switching to {(lazyAvailable ? "lazy page decompression (LRU page cache)" : "on-disk section cache")}");
+			}
+		}
+
+		if (sectionName == DwgSectionDefinition.AcDbObjects
+			&& useLazy
 			&& descriptor.IsCompressed
 			&& this._fileStream.Stream is FileStream rawFileLazy)
 		{
 			if (this.Configuration.ParallelDecode || this.Configuration.UseDiskSectionCache)
 			{
-				Console.Error.WriteLine("[ACadSharp] UseLazyObjectSection 与 ParallelDecode/UseDiskSectionCache 互斥，回退整节解压（eager）模式。");
+				Console.Error.WriteLine("[ACadSharp] UseLazyObjectSection is mutually exclusive with ParallelDecode/UseDiskSectionCache; falling back to the full (eager) decompression.");
 			}
 			else
 			{
-				// 注意：页目录必须先于任何页头解析快照——decryptDataSection 会用 (checksum + startOffset) 覆盖 LocalSections[].Offset，
-				// 而此处的 Offset 是惰性流定位页所需的"解压映像内偏移"（构造时已固化到数组）。
+				// Note: the page directory must be snapshotted before any page-header parse - decryptDataSection overwrites
+				// LocalSections[].Offset with (checksum + startOffset), while the Offset kept here is the "offset inside the
+				// decompressed image" the lazy stream uses to locate the pages (fixed into the arrays at construction time).
 				var lazy = new DwgLazySectionStream(rawFileLazy.Name, descriptor, this.Configuration);
 
-				// [PERF] RetainPatchSource 增量保存需要页头元数据（CompressedSize/PageSize/Checksum）构建 patch source：
-				// 此处做"仅头部扫描"——在原始流上直接 seek 各页 32B XOR 头并解析（不解压页体；BGDY ~27.7k 页约 0.1-0.2s）。
-				// 字段语义与 decryptDataSection 完全一致（同一 XOR 掩码 0x4164536B^seeker、小端 4 字节布局）。
+				// [PERF] RetainPatchSource (incremental save) needs the page-header metadata (CompressedSize/PageSize/Checksum) to
+				// build the patch source: do a "headers-only scan" here - seek each page's 32B XOR header directly on the raw
+				// stream and parse it without decompressing the page body (BGDY: ~27.7k pages in ~0.1-0.2s).
+				// The field semantics are exactly the same as decryptDataSection (same XOR mask 0x4164536B^seeker, little-endian 4-byte layout).
 				if (this.Configuration.RetainPatchSource)
 				{
 					byte[] pageHdr = new byte[32];
@@ -718,7 +762,7 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 						lastCompressedSize = (long)section.CompressedSize;
 					}
 
-					//与 eager 路径读后状态对齐：原始流定位到最后一页压缩数据尾部
+					//Align the post-read state with the eager path: position the raw stream at the end of the last page's compressed data
 					if (lastSeeker != 0)
 						rawFileLazy.Position = lastSeeker + 32 + lastCompressedSize;
 				}
@@ -728,7 +772,7 @@ public class DwgReader : CadReaderBase<DwgReaderConfiguration>
 		}
 
 		//get the total size of the page
-		Stream memoryStream = this.CreateSectionBuffer(sectionName, (long)descriptor.DecompressedSize * descriptor.LocalSections.Count);
+		Stream memoryStream = this.CreateSectionBuffer(sectionName, (long)descriptor.DecompressedSize * descriptor.LocalSections.Count, useDisk);
 
 		// [PATCH] One page-header reader per section (the original used one per page): the objects section has
 		// 27,000 pages, which avoids the repeated allocation of a new reader and its 64KB byte buffer per page
