@@ -118,6 +118,15 @@ public class BlockRecord : TableEntry, IGeometricEntity
 	public CadObjectCollection<Entity> Entities { get; private set; }
 
 	/// <summary>
+	/// [PATCH] Canonical file-order list of the entities owned by this block.
+	/// <see cref="Entities"/> is backed by a HashSet (iteration = hash order, not stable across
+	/// processes); when this list is non-empty, readers, writers and renderers must iterate it
+	/// instead of <see cref="Entities"/>. It holds exactly the same entity instances as
+	/// <see cref="Entities"/>.
+	/// </summary>
+	public List<Entity> FileOrderEntities { get; set; }
+
+	/// <summary>
 	/// Gets the evaluation graph for this block if it has dynamic properties attached to it.
 	/// </summary>
 	public EvaluationGraph EvaluationGraph

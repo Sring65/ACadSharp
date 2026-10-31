@@ -2486,7 +2486,9 @@ internal partial class DwgObjectWriter : DwgSectionIO
 		if (this.R2013Plus)
 		{
 			//The scenario flag becomes 1 if the knot parameter is Custom or has no fit data, otherwise 2.
-			if (spline.KnotParametrization == KnotParametrization.Custom || spline.FitPoints.Count == 0)
+			// [P5] 有控制点时优先 scenario 1：带拟合点的样条（DXF 模板导入，10/11 组码并存）按控制点+节矢
+			// 原样写出，往返后曲线定义逐字节一致（理由同下 pre-R2013 分支）。
+			if (spline.ControlPoints.Count > 0 || spline.KnotParametrization == KnotParametrization.Custom || spline.FitPoints.Count == 0)
 			{
 				scenario = 1;
 				//If scenario is 1, the spline flags must not have the UseKnotParameter bit set or the file will be corrupt
@@ -2505,7 +2507,12 @@ internal partial class DwgObjectWriter : DwgSectionIO
 		}
 		else
 		{
-			scenario = (spline.FitPoints.Count <= 0) ? 1 : 2;
+			// [P5] 有控制点时优先 scenario 1（控制点+节矢原样写出）：带拟合点的样条（如 DXF 模板导入、
+			// 10/11 组码并存）原走 scenario 2（只写拟合点，控制点不落盘）→ 读回 ControlPoints 为空，
+			// 图像引擎退化为「拟合点折线」，与 live 渲染不一致（P5 14 行 SVG 差异根因）。
+			// scenario 1 保持曲线定义逐字节一致；拟合点不写出（格式上两 scenario 互斥，scenario 2 独有），
+			// 曲线不变。纯拟合点样条（cp=0）仍走 scenario 2，行为不变。
+			scenario = (spline.ControlPoints.Count > 0) ? 1 : ((spline.FitPoints.Count <= 0) ? 1 : 2);
 			if (scenario == 2 && spline.KnotParametrization != 0)
 			{
 				scenario = 1;

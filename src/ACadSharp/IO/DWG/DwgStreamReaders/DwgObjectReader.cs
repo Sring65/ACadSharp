@@ -1272,10 +1272,13 @@ namespace ACadSharp.IO.DWG
 				for (int i = 0; i < nownedObjects; ++i)
 				{
 					//H[ENTITY(hard owner)] Repeats “Owned Object Count” times.
+					// [PATCH] The loop reads handles in file order — record them in file order
+					// (AddOwnedHandlerInFileOrder mirrors the unordered HashSet) so build() can
+					// attach the block's entities in canonical file order.
 					if (suppressOwnedExpand)
-						template.OwnedObjectsHandlers.Add(this._handlesReader.HandleReference());
+						template.AddOwnedHandlerInFileOrder(this._handlesReader.HandleReference());
 					else
-						template.OwnedObjectsHandlers.Add(this.handleReference());
+						template.AddOwnedHandlerInFileOrder(this.handleReference());
 				}
 			}
 

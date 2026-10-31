@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using ACadSharp.Blocks;
 using ACadSharp.Entities;
 using ACadSharp.IO.DXF.DxfStreamWriter;
@@ -88,7 +89,11 @@ namespace ACadSharp.IO.DXF
 			}
 			else
 			{
-				foreach (Entity e in b.Entities)
+				// [PATCH] Iterate in canonical file order: BlockRecord.Entities is HashSet-backed
+				// (iteration = hash order, not stable across processes) → DXF block entity order
+				// would drift between runs without this.
+				IEnumerable<Entity> ents = b.FileOrderEntities is { Count: > 0 } fo ? fo : b.Entities;
+				foreach (Entity e in ents)
 				{
 					this.writeEntity(e);
 				}

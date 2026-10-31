@@ -21,9 +21,9 @@ using System.Runtime.InteropServices;
 [assembly: InternalsVisibleTo("ACadSharp.Formats, PublicKey=0024000004800000940000000602000000240000525341310004000001000100b148ab602997d7649ec11cf13981ab8cf9518f0ecdc7cde5f458efb8b94bdbb9c553bc6f2c65fb293bacb5661a374250f1792183b475b91c69eb26ed6eed3094caddf4957f8bfef2ac0ae127ff4e2134d9411b4cad6e83e1d2a0a3aec4c16771d8ad4b31d89099d2d4521b3fd05fb3e1bf1981045c7241e9cbbf65d6cd64fcbd")]
 [assembly: InternalsVisibleTo("ACadSharp.Formats.Tests, PublicKey=0024000004800000940000000602000000240000525341310004000001000100b148ab602997d7649ec11cf13981ab8cf9518f0ecdc7cde5f458efb8b94bdbb9c553bc6f2c65fb293bacb5661a374250f1792183b475b91c69eb26ed6eed3094caddf4957f8bfef2ac0ae127ff4e2134d9411b4cad6e83e1d2a0a3aec4c16771d8ad4b31d89099d2d4521b3fd05fb3e1bf1981045c7241e9cbbf65d6cd64fcbd")]
 
-// [PATCH] Allows the one-shot streaming export (DwgStreamExporter) of a downstream consumer to reuse the internal encoders.
-// Note: this library has strong-name signing (SignAssembly) enabled; an unsigned InternalsVisibleTo triggers CS1726.
-// If a downstream consumer needs to access internal types, it must declare a strong name with a public key, e.g.:
-//   [assembly: InternalsVisibleTo("a downstream consumer, PublicKey=<public key of the consumer>")]
-// The public entry points exposed by streaming export (DwgWriter.BeginStreamingObjects / DxfWriter.BeginStreamingEntities
-// etc.) do not depend on internal visibility, so the downstream consumer can go through the public API.
+// [PATCH] Allows the GDB2CAD downstream (Gdb2CadLib's DwgStreamExporter / DwgEntityWkb) to reuse
+// the internal encoders (DwgObjectWriter / CadTemplate). This library has strong-name signing
+// (SignAssembly) enabled, so the friend assemblies must be strong-named with the same key pair
+// (GDB2CAD repo: src\Gdb2Cad.snk, public key below; token d162c9a1fb19e3).
+[assembly: InternalsVisibleTo("Gdb2CadLib, PublicKey=002400000480000094000000060200000024000052534131000400000100010001d20f1103f6cb34212ab879ec83e83f6975c59afa0402e96228c7454e5c50fabe9b4531f93ca8eed2f42fd65a0b73c41ab5cf3395501d2ce7a99179e5ef6402b9dafdba47e193d9766d153640d7a48a6af25c38db26c3c253c22817cada29841bf7e3561de7680f77aae3929b8dc344cab9e47d4bcdd19ea8097f0b506f3dfc")]
+[assembly: InternalsVisibleTo("GDB2CAD.Tests, PublicKey=002400000480000094000000060200000024000052534131000400000100010001d20f1103f6cb34212ab879ec83e83f6975c59afa0402e96228c7454e5c50fabe9b4531f93ca8eed2f42fd65a0b73c41ab5cf3395501d2ce7a99179e5ef6402b9dafdba47e193d9766d153640d7a48a6af25c38db26c3c253c22817cada29841bf7e3561de7680f77aae3929b8dc344cab9e47d4bcdd19ea8097f0b506f3dfc")]

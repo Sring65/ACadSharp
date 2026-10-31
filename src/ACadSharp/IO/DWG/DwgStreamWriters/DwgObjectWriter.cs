@@ -786,7 +786,8 @@ internal partial class DwgObjectWriter : DwgSectionIO
 
 		// [PATCH] Decouple the entity-set cache from serialization: under P0 dirty tracking an unmodified BlockRecord skips
 		// serialization, but the cache must be retained — writeBlockEntities depends on it to iterate each block's entities.
-		Entity[] entities = this.getCompatibleEntities(blkRecord.Entities);
+		// [PATCH] Feed canonical file order when available (Entities is HashSet-backed).
+		Entity[] entities = this.getCompatibleEntities(blkRecord.FileOrderEntities is { Count: > 0 } fo ? fo : blkRecord.Entities);
 		this._blockCompatibleEntities.Add(blkRecord, entities);
 
 		if (this.skipClean(blkRecord))

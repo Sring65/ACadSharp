@@ -187,11 +187,18 @@ namespace ACadSharp.IO.DXF
 
 				if (entityTemplate.OwnerHandle == null)
 				{
-					recordTemplate.ReferenceTemplates.Add(entityTemplate);
+					// [PATCH] Ordered registration (was HashSet): DXF file order is the canonical
+					// block entity order; build() consumes ReferenceTemplates in this order.
+					recordTemplate.AddReferenceTemplate(entityTemplate);
 				}
 				else if (this._builder.TryGetObjectTemplate(entityTemplate.OwnerHandle, out ICadOwnerTemplate owner))
 				{
-					owner.OwnedObjectsHandlers.Add(entityTemplate.CadObject.Handle);
+					// [PATCH] Block records get the ordered owned-handle registration so build()
+					// can attach entities in file order (other owner types keep the plain add).
+					if (owner is CadBlockRecordTemplate blockOwner)
+						blockOwner.AddOwnedHandlerInFileOrder(entityTemplate.CadObject.Handle);
+					else
+						owner.OwnedObjectsHandlers.Add(entityTemplate.CadObject.Handle);
 				}
 				else
 				{
