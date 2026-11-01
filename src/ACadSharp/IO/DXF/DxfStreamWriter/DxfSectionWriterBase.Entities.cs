@@ -967,7 +967,11 @@ internal abstract partial class DxfSectionWriterBase
 		// when it is 0 (the GIS-exported 5-vertex polyline has 43=0.0 in both the source
 		// and the reference) — so track presence explicitly instead of writing it only
 		// when non-zero.
-		if (polyline.ConstantWidthSpecified)
+		// [PATCH 2] Synthesized entities (GDB2CAD sets ConstantWidth from the configured
+		// lineweight but keeps ConstantWidthSpecified=false so the image engines'
+		// Option-B gate stays unaffected) must still emit 43: a non-zero ConstantWidth
+		// is the entity's global width (AutoCAD 属性面板"全局宽度").
+		if (polyline.ConstantWidthSpecified || polyline.ConstantWidth > 0)
 		{
 			this._writer.Write(43, polyline.ConstantWidth);
 		}

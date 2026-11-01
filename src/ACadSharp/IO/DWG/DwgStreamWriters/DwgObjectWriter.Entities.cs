@@ -1325,7 +1325,9 @@ internal partial class DwgObjectWriter : DwgSectionIO
 
 		// [PATCH] The constant-width flag (0x4) follows the DXF presence of code 43,
 		// not its value: a source polyline with 43=0.0 must round-trip the code.
-		if (lwPolyline.ConstantWidthSpecified)
+		// [PATCH 2] A synthesized non-zero ConstantWidth (GDB2CAD configured lineweight)
+		// sets the flag too — must mirror the value condition below.
+		if (lwPolyline.ConstantWidthSpecified || lwPolyline.ConstantWidth > 0)
 		{
 			flags = (short)(flags | 0x4);
 		}
@@ -1361,7 +1363,8 @@ internal partial class DwgObjectWriter : DwgSectionIO
 		this._writer.WriteBitShort(flags);
 
 		// [PATCH] Mirrors the 0x4 flag condition above (see flag block).
-		if (lwPolyline.ConstantWidthSpecified)
+		// [PATCH 2] Same condition as the 0x4 flag above (see flag block).
+		if (lwPolyline.ConstantWidthSpecified || lwPolyline.ConstantWidth > 0)
 		{
 			this._writer.WriteBitDouble(lwPolyline.ConstantWidth);
 		}
