@@ -410,6 +410,10 @@ public class BlockRecord : TableEntry, IGeometricEntity
 			BlockRecord cut = (BlockRecord)base.Clone();
 			cut.Layout = null;
 			cut.Entities = new CadObjectCollection<Entity>(cut);
+			// Same leak as the normal branch below: MemberwiseClone shares the source record's
+			// FileOrderEntities list (source-document entities). The truncated clone has an empty
+			// entity set, so the ordered list must be dropped, not shared.
+			cut.FileOrderEntities = null;
 			return cut;
 		}
 
@@ -424,16 +428,33 @@ public class BlockRecord : TableEntry, IGeometricEntity
 			}
 
 			clone.Entities = new CadObjectCollection<Entity>(clone);
+			var sourceToClone = new Dictionary<Entity, Entity>();
 			foreach (var item in this.GetSortedEntities())
 			{
 				var e = (Entity)item.Clone();
 				clone.Entities.Add(e);
+				sourceToClone[item] = e;
 			}
 
 			clone.BlockEntity = (Block)this.BlockEntity.Clone();
 			clone.BlockEntity.Owner = clone;
 			clone.BlockEnd = (BlockEnd)this.BlockEnd.Clone();
 			clone.BlockEnd.Owner = clone;
+
+			// [PATCH 2026-11-01] base.Clone() 是 MemberwiseClone：它会把源记录的 FileOrderEntities
+			// List 引用原样共享给克隆。DWG 读取端会为每个非空块定义设置 FileOrderEntities（指向源
+			// 文档的实体，Owner=源块、Document=源文档、源句柄，见 CadBlockRecordTemplate.build），
+			// 于是深克隆出的块定义仍"看到"源实体：优先消费 FileOrderEntities 的流式写入端
+			// （DwgObjectWriter / GDB2CAD DwgStreamExporter.AddBlockDefinitionAcad）会拿源实体当写入
+			// 列表，挂入克隆块时触发 CadDocument.AddCadObject 的 Document 检查抛
+			// "already assigned to a document"（大样本 DWG 直切裁剪崩溃根因）。
+			// 此处用克隆实体按源文件序重建，保持文件序语义且克隆自包含。
+			clone.FileOrderEntities = this.FileOrderEntities is { Count: > 0 }
+				? this.FileOrderEntities
+						.Select(x => sourceToClone.TryGetValue(x, out var c) ? c : null)
+						.Where(x => x != null)
+						.ToList()
+				: null;
 
 			return clone;
 		}
