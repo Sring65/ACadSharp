@@ -31,6 +31,14 @@ namespace ACadSharp.IO;
 /// </summary>
 public partial class DwgWriter
 {
+	/// <summary>
+	/// [PATCH] Optional hook invoked in EndStreamingObjects after UpdateDxfClasses(false) and
+	/// before writeClasses(): lets the caller fix class-table state that streaming writes cannot
+	/// track (streamed entities never enter _cadObjects, so their class instance counts reset to 0).
+	/// e.g. set the MESH class InstanceCount to the actual number of streamed Mesh entities.
+	/// </summary>
+	public Action<CadDocument>? PreClassWriteFixup { get; set; }
+
 	internal DwgObjectWriter BeginStreamingObjects()
 	{
 		base.Write();
@@ -76,7 +84,9 @@ public partial class DwgWriter
 		// Class table: built-in entities do not implement IDxfClassDefined (not in the class
 		// table), and the table/block entry counts are rebuilt from _cadObjects;
 		// streaming entities never enter _cadObjects, so no count correction is needed
+		// (callers with streamed-only classes set PreClassWriteFixup to patch their counts here)
 		doc.UpdateDxfClasses(false);
+		this.PreClassWriteFixup?.Invoke(doc);
 		this.writeClasses();
 
 		// Header section (HANDSEED/$EXTMIN/$EXTMAX are accumulated by the caller during conversion and are final by now)
