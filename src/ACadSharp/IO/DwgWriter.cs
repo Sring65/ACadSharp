@@ -172,7 +172,8 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 		{
 			//R2007: write sections in AutoCAD's native physical page order (verified against DrawingR2007.dwg: data page
 			//ids 3-16 match the physical order: SummaryInfo=3, Preview=4, AppInfo=5,
-			//AppInfoHistory=6, RevHistory=7, AcDbObjects=8-10, ObjFreeSpace=11,
+			//[AppInfoHistory=6: not written — the upstream AC21 writer has no AppInfoHistory section],
+			//RevHistory=7, AcDbObjects=8-10, ObjFreeSpace=11,
 			//Template=12, Handles=13, Classes=14, AuxHeader=15, Header=16).
 			//Page ids are assigned by AddSection in increasing order; a different order produces page table/section table
 			//records different from the native ones (misaligned page id references). R2007 section writes do not mutate document state (no gradient synthesis,
@@ -181,7 +182,6 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 			this.writeSummaryInfo();
 			this.writePreview();
 			this.writeAppInfo();
-			this.writeAppInfoHistory();
 			this.writeRevHistory();
 			this.writeObjects();
 			this.writeObjFreeSpace();
@@ -201,7 +201,6 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 			this.writePreview();
 			//this.writeVBASection();
 			this.writeAppInfo();
-			this.writeAppInfoHistory();
 			// Both R2000 and earlier, and R2013+, contain the FileDepList section (R2004/R2007 are handled in their own
 			// branches above: R2004 does not write FileDepList, and the R2007 native order has no such section). This writer's FileDepList is always empty.
 			this.writeFileDepList();
@@ -283,37 +282,10 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 			return;
 
 		MemoryStream stream = new MemoryStream();
-		if (this._version == ACadVersion.AC1021)
-		{
-			//R2007: use the AppInfo content of AutoCAD's native empty document (paired data with AppInfoHistory;
-			//history references its GUID), ensuring the section content is exactly identical to native.
-			//This content is already the raw Ac21-compressed stream verbatim from the native page data area; isCompressed=false
-			//(AC21 semantics: false = stored as-is, not compressed again).
-			byte[] data = DWG.DwgStreamWriters.Ac21NativeSections.AppInfo;
-			stream.Write(data, 0, data.Length);
-		}
-		else
-		{
-			DwgAppInfoWriter writer = new DwgAppInfoWriter(this._version, stream);
-			writer.Write();
-		}
+		DwgAppInfoWriter writer = new DwgAppInfoWriter(this._version, stream);
+		writer.Write();
 
 		this._fileHeaderWriter.AddSection(DwgSectionDefinition.AppInfo, stream, false, 0x80);
-	}
-
-	private void writeAppInfoHistory()
-	{
-		if (this._version != ACadVersion.AC1021)
-			return;
-
-		//The R2007 native empty document contains an AcDb:AppInfoHistory section (encoding=1);
-		//write the natively captured content (see Ac21NativeSections). This content is already the raw Ac21
-		//compressed stream verbatim from the native page data area; isCompressed=false (stored as-is).
-		MemoryStream stream = new MemoryStream();
-		byte[] data = DWG.DwgStreamWriters.Ac21NativeSections.AppInfoHistory;
-		stream.Write(data, 0, data.Length);
-
-		this._fileHeaderWriter.AddSection(DwgSectionDefinition.AppInfoHistory, stream, false, 0x80);
 	}
 
 	private void writeAuxHeader()

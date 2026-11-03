@@ -56,8 +56,11 @@ internal class DwgFileHeaderWriterAC21 : DwgFileHeaderWriterBase<DwgFileHeaderAC
 	}
 
 	// [PATCH] The base interface is widened from MemoryStream to Stream (low-memory mode:
-	// sections may come from a temp file). The AC21 descriptor requires a MemoryStream
-	// (GetBuffer), so buffer the incoming stream here.
+	// sections may come from a temp file). The AC21 descriptor requires a MemoryStream with
+	// a public buffer (upstream createDescriptorSection calls GetBuffer), so buffer the
+	// incoming stream here. publicBuffer: true makes the stream own a copy of the data —
+	// the wrapping constructor new MemoryStream(byte[], bool) would throw
+	// UnauthorizedAccessException from GetBuffer.
 	public override void AddSection(string name, Stream stream, bool isCompressed, int decompsize = 0x7400)
 	{
 		long length = stream.Length;
@@ -75,7 +78,7 @@ internal class DwgFileHeaderWriterAC21 : DwgFileHeaderWriterBase<DwgFileHeaderAC
 			read += r;
 		}
 
-		this._descriptors[name].Stream = new MemoryStream(data, writable: true);
+		this._descriptors[name].Stream = new MemoryStream(data, 0, data.Length, writable: true, publiclyVisible: true);
 	}
 
 	public override void WriteFile()
