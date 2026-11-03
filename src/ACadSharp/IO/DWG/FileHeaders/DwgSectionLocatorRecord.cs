@@ -2,7 +2,7 @@ using System.IO;
 
 namespace ACadSharp.IO.DWG.FileHeaders;
 
-internal class DwgSectionLocatorRecord 
+internal class DwgSectionLocatorRecord
 {
 	/// <summary>
 	/// Number of the record or id.

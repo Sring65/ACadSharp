@@ -2,6 +2,7 @@ using ACadSharp.Exceptions;
 using ACadSharp.Header;
 using ACadSharp.IO.DWG;
 using ACadSharp.IO.DWG.DwgStreamWriters;
+using ACadSharp.IO.DWG.FileHeaders;
 using ACadSharp.Tables.Collections;
 using CSUtilities.IO;
 using CSUtilities.Text;
@@ -335,7 +336,8 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 
 	private void writeFileDepList()
 	{
-		if (this._fileHeader.AcadVersion < ACadVersion.AC1018)
+		//ACadVersion.AC1021 should have this section but right now it breaks the files
+		if (this._fileHeader.AcadVersion < ACadVersion.AC1018 || this._fileHeader.AcadVersion == ACadVersion.AC1021)
 			return;
 
 		MemoryStream stream = new MemoryStream();
@@ -680,6 +682,7 @@ public partial class DwgWriter : CadWriterBase<DwgWriterConfiguration>
 		StreamIO swriter = new StreamIO(stream);
 		swriter.Write<uint>(0);
 		swriter.Write<uint>(0);
+		swriter.Write<uint>(1);
 		swriter.Write<uint>(0);
 		this._fileHeaderWriter.AddSection(DwgSectionDefinition.RevHistory, stream, true);
 	}

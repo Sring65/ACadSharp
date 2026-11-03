@@ -1,3 +1,4 @@
+using ACadSharp.IO.DWG.FileHeaders;
 using System;
 using System.Diagnostics;
 using System.IO;
